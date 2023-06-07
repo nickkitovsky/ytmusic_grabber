@@ -1,11 +1,24 @@
 import atexit
+import enum
 import json
+import logging
 import shlex
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
 import httpx
+
+from common_utils import retry
+
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())
+
+
+logger.setLevel(logging.ERROR)
+handler = logging.StreamHandler()
+handler.setLevel(logging.ERROR)
+logger.addHandler(handler)
 
 
 class AuthData:
@@ -69,9 +82,36 @@ class AuthData:
 
 
 class ApiClient:
-    def __init__(self) -> None:
+    def __init__(self, auth_data: AuthData) -> None:
+        self._API_URL = "https://music.youtube.com/youtubei/v1/browse"
+        self._authdata = auth_data
         self._client = self._init_client()
         atexit.register(self._close_client, self._client)
+
+    @retry(5, 1)
+    def send_request(self, payload: dict[str, str]) -> dict:
+        json_with_payload = self._set_payload(self._authdata.json_data, payload)
+        response = self._client.post(
+            url=self._API_URL,
+            cookies=self._authdata.cookies,
+            headers=self._authdata.header,
+            params=self._authdata.params,
+            json=json_with_payload,
+        )
+        if response.is_success:
+            return response.json()
+        else:
+            logger.error('Error of get response with:\n%s', payload)
+            raise httpx.ResponseNotRead()
+
+    def _set_payload(self, json_data: dict, payload: dict[str, str]):
+        if browse_id := payload.get("browseId"):
+            json_data["browseId"] = browse_id
+        if params := payload.get("params"):
+            json_data["params"] = params
+        if playlist_id := payload.get("playlistId"):
+            json_data["playlistId"] = playlist_id
+        return json_data
 
     def _init_client(self) -> httpx.Client:
         return httpx.Client()
@@ -80,7 +120,19 @@ class ApiClient:
         client.close()
 
 
+class StartPages(enum.Enum):
+    home = {'browse_id': 'FEmusic_home'}
+    library = {'browse_id': 'FEmusic_library_landing'}
+    listen_again = {'browse_id': 'FEmusic_listen_again'}
+    mixed_for_you = {'browse_id': 'FEmusic_mixed_for_you'}
+    moods_and_genres = {'browse_id': 'FEmusic_moods_and_genres'}
+    new_releases_albums = {'browse_id': 'FEmusic_new_releases_albums'}
+
+    def __init__(self, payload) -> None:
+        self.payload = payload
+
+
 class YtMusic:
     def __init__(self, curl_file: str | Path) -> None:
-        self.auth_data = AuthData(curl_file=curl_file)
-        self.client = ApiClient()
+        auth_data = AuthData(curl_file=curl_file)
+        self.client = ApiClient(auth_data)
